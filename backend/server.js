@@ -41,56 +41,105 @@ const io = new Server(httpServer, {
 // Set port
 const PORT = process.env.PORT || 5000;
 
-// Initialize Redis and MongoDB connections
-async function initializeConnections() {
-  try {
-    // Connect to MongoDB
-    await mongoose.connect(process.env.MONGO_URI);
-    console.log("✅ Connected to MongoDB");
-
-    // Connect to Redis
-    await redisClient.connect();
-    console.log("✅ Redis connection initialized");
-
-    // Warm up cache with frequently accessed data
-    if (process.env.NODE_ENV === 'production') {
-      console.log("🔥 Warming up cache...");
-      await cacheService.warmNotesCache();
+// ─── Startup banner helper ───────────────────────────────────────────────────
+function printStartupBanner(redisOk) {
+  const env = process.env.NODE_ENV === 'production' ? 'Production' : 'Development';
+  const redisHost = (() => {
+    try {
+      const url = new URL(process.env.REDIS_URL || 'redis://localhost:6379');
+      return `${url.hostname}:${url.port || 6379}`;
+    } catch {
+      return 'localhost:6379';
     }
+  })();
 
-    // Schedule cache warming every 6 hours
-    cron.schedule('0 */6 * * *', async () => {
-      console.log("🔄 Scheduled cache warming...");
-      try {
-        await cacheService.warmNotesCache();
-        console.log("✅ Cache warming completed");
-      } catch (error) {
-        console.error("❌ Cache warming failed:", error);
-      }
-    });
-
-    // Health check for cache every hour
-    cron.schedule('0 * * * *', async () => {
-      try {
-        const health = await cacheService.healthCheck();
-        if (health.status !== 'healthy') {
-          console.warn("⚠️ Cache health check failed:", health.message);
-        }
-      } catch (error) {
-        console.error("❌ Cache health check error:", error);
-      }
-    });
-
-  } catch (error) {
-    console.error("❌ Failed to initialize connections:", error);
-    process.exit(1);
+  console.log('');
+  console.log('╔══════════════════════════════════╗');
+  console.log('║        ✓  Server Started         ║');
+  console.log('╚══════════════════════════════════╝');
+  console.log('');
+  console.log(`  Environment : ${env}`);
+  console.log(`  Port        : ${PORT}`);
+  console.log(`  Redis       : ${redisOk ? 'Connected' : 'Disconnected (degraded mode)'}`);
+  if (redisOk) {
+    console.log(`  Redis Host  : ${redisHost}`);
+    console.log('  Cache       : Ready');
+  } else {
+    console.log('  Cache       : Disabled');
   }
+  console.log('  Socket.IO   : Ready');
+  console.log('');
 }
 
-// Initialize connections
-initializeConnections();
+// ─── Initialize Redis and MongoDB connections ────────────────────────────────
+async function initializeConnections() {
+  // 1. Connect to MongoDB — server exits only if Mongo fails (app cannot work without DB)
+  try {
+    await mongoose.connect(process.env.MONGO_URI);
+    console.log("✅ Connected to MongoDB");
+  } catch (error) {
+    console.error("❌ Failed to connect to MongoDB:", error.message);
+    process.exit(1);
+  }
 
-// Middleware
+  // 2. Connect to Redis — server continues even if Redis fails (graceful degradation)
+  let redisOk = false;
+  try {
+    const result = await redisClient.connect();
+    redisOk = result !== null && redisClient.isReady();
+    if (!redisOk) {
+      console.warn("⚠️  Redis unavailable. Application started with Redis disabled.");
+    }
+  } catch (error) {
+    console.warn("⚠️  Redis unavailable. Application started with Redis disabled.");
+  }
+
+  // 3. Startup cache warming — async, never blocks server startup, skips if Redis down
+  if (redisOk) {
+    setImmediate(async () => {
+      try {
+        // Check if cache already has data before warming
+        const existing = await cacheService.getCachedNotesList(null);
+        if (!existing) {
+          console.log("🔥 Running startup cache warming...");
+          await cacheService.warmNotesCache();
+          console.log("✅ Startup cache warming complete");
+        } else {
+          console.log("⚡ Cache already warm — skipping startup warming");
+        }
+      } catch (error) {
+        console.error("❌ Startup cache warming failed (non-fatal):", error.message);
+      }
+    });
+  }
+
+  // 4. Schedule cache warming every 6 hours
+  cron.schedule('0 */6 * * *', async () => {
+    console.log("🔄 Scheduled cache warming...");
+    try {
+      await cacheService.warmNotesCache();
+      console.log("✅ Cache warming completed");
+    } catch (error) {
+      console.error("❌ Cache warming failed:", error.message);
+    }
+  });
+
+  // 5. Health check for cache every hour
+  cron.schedule('0 * * * *', async () => {
+    try {
+      const health = await cacheService.healthCheck();
+      if (health.status !== 'healthy') {
+        console.warn("⚠️ Cache health check failed:", health.message);
+      }
+    } catch (error) {
+      console.error("❌ Cache health check error:", error.message);
+    }
+  });
+
+  return redisOk;
+}
+
+// ─── Middleware ──────────────────────────────────────────────────────────────
 app.use(cors({
   origin: [
     "http://localhost:5173",
@@ -120,7 +169,7 @@ app.use(session({
 app.use(passport.initialize());
 app.use(passport.session());
 
-// Error handling middleware
+// ─── Error handling middleware ───────────────────────────────────────────────
 app.use((err, req, res, next) => {
   console.error('Error:', err);
 
@@ -159,7 +208,7 @@ app.use((err, req, res, next) => {
   });
 });
 
-// Routes
+// ─── Routes ─────────────────────────────────────────────────────────────────
 app.get("/", (req, res) => {
   res.send("Welcome to Notora Backend");
 });
@@ -211,7 +260,7 @@ app.use("/api/contact", contactRoutes);
 app.use("/api/payment", paymentRoutes);
 app.use("/api/health", healthRoutes);
 
-// Socket.IO connection handling
+// ─── Socket.IO connection handling ──────────────────────────────────────────
 io.use(async (socket, next) => {
   try {
     const token = socket.handshake.auth.token;
@@ -314,19 +363,26 @@ io.on("connection", (socket) => {
   });
 });
 
-// Graceful shutdown
-process.on('SIGTERM', async () => {
-  console.log('SIGTERM received, shutting down gracefully...');
-  await redisClient.disconnect();
+// ─── Graceful shutdown ───────────────────────────────────────────────────────
+async function shutdown(signal) {
+  console.log(`\n${signal} received, shutting down gracefully...`);
+  try {
+    await redisClient.disconnect();
+    console.log('✅ Redis disconnected');
+  } catch {
+    // ignore
+  }
   process.exit(0);
-});
+}
 
-process.on('SIGINT', async () => {
-  console.log('SIGINT received, shutting down gracefully...');
-  await redisClient.disconnect();
-  process.exit(0);
-});
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT',  () => shutdown('SIGINT'));
 
-httpServer.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-});
+// ─── Start server ────────────────────────────────────────────────────────────
+// Initialize connections first, then bind the port
+(async () => {
+  const redisOk = await initializeConnections();
+  httpServer.listen(PORT, () => {
+    printStartupBanner(redisOk);
+  });
+})();

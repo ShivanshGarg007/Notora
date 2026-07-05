@@ -45,3 +45,5 @@ Thumbs.db
 # Google Cloud credentials
 **/google-credentials*.json
 **/config/google-credentials.json
+
+package-lock.json
