@@ -1,0 +1,35 @@
+name: Keep Alive - Ping Render Backend
+
+# ── Triggers ────────────────────────────────────────────────────────────────
+on:
+  schedule:
+    # Run every 5 minutes (UTC) — keeps Render free-tier instance warm
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    # Allow manual trigger from the GitHub Actions tab
+
+# ── Jobs ────────────────────────────────────────────────────────────────────
+jobs:
+  ping:
+    name: Ping Health Endpoint
+    runs-on: ubuntu-latest
+    timeout-minutes: 2          # Abort if the request hangs
+
+    steps:
+      - name: Ping /api/health
+        # --fail-with-body  — exit non-zero on 4xx/5xx but still show body
+        # --max-time 30     — give Render up to 30 s to cold-start
+        # || true           — fail gracefully; never fail the workflow
+        run: |
+          echo "Pinging https://notora-backend.onrender.com/api/health ..."
+          curl \
+            --silent \
+            --show-error \
+            --fail-with-body \
+            --max-time 30 \
+            --retry 2 \
+            --retry-delay 5 \
+            https://notora-backend.onrender.com/api/health \
+          && echo "" \
+          && echo "✅ Backend is alive" \
+          || echo "⚠️  Ping failed (backend may be cold-starting — will retry on next run)"
